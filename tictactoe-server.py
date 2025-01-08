@@ -201,18 +201,22 @@ class GameServer:
 
     def handle_join_game(self, conn: socket.socket, addr):
         """Handle a client joining an existing game."""
-        available_games = [f"Game {gid} ({len(game.players)} players, Board: {game.board_size}x{game.board_size})"
-                         for gid, game in self.games.items()
-                         if game.game_active]
+        active_games = [game for game in self.games.values() if game.game_active]
         
-        if not available_games:
+        if not active_games:
             conn.send("No games available".encode(self.FORMAT))
             choice = conn.recv(1024).decode(self.FORMAT)
             if choice == "1":
                 self.handle_new_game(conn, addr)
             return
-            
-        conn.send(("\n".join(available_games)).encode(self.FORMAT))
+        
+        # Format game list
+        games_info = []
+        for game in active_games:
+            games_info.append(f"Game {game.game_id} ({len(game.players)} players, Board: {game.board_size}x{game.board_size})")
+        
+        # Send the list of games
+        conn.send(("\n".join(games_info)).encode(self.FORMAT))
         
         try:
             game_id_raw = conn.recv(1024).decode(self.FORMAT)
@@ -230,7 +234,7 @@ class GameServer:
                 conn.send("Cannot join game - game is inactive or full".encode(self.FORMAT))
                 return
             
-            conn.send(f"Joined game {game_id}.\n".encode(self.FORMAT))
+            # Start handling the game for this player
             self.handle_game(game, conn)
             
         except ValueError:
