@@ -6,56 +6,77 @@ from typing import Dict, List, Optional
 class TicTacToeGame:
     """
     A class representing a single Tic-Tac-Toe game instance.
-    Handles game logic, board state, and player management.
+    Handles game logic, board state, and dynamic player management.
     """
-    def __init__(self, game_id: int, board_size: int):
+    def __init__(self, game_id: int):
         """
         Initialize a new game instance.
         
         Args:
             game_id (int): Unique identifier for the game
-            board_size (int): Size of the game board (board_size x board_size)
         """
-        if not isinstance(board_size, int) or board_size < 3:
-            raise ValueError("Board size must be an integer >= 3")
-            
         self.game_id = game_id
-        self.board_size = board_size
-        self.board = [[' ' for _ in range(board_size)] for _ in range(board_size)]
+        self.min_players = 2
+        self.board_size = 3  # Initial board size
+        self.board = [[' ' for _ in range(self.board_size)] for _ in range(self.board_size)]
         self.players: List[tuple] = []  # List of (connection, address, symbol) tuples
         self.current_turn = 0
         self.game_active = True
-        self.symbols = ['X', 'O', '∆', '#', '@', '&', '%', '*', '+']
+        self.game_started = False
+        self.symbols = ['X', 'O', '∆', '#', '@', '&', '%', '*', '+', '£', '€', '¥', '§', '¢', '¤']  # Extended symbols
         self.last_move = None
         self.FORMAT = 'utf-8'
+        self.lock = threading.Lock()  # Add lock for thread safety
+
+    def resize_board(self, new_size: int):
+        """Resize the board while preserving existing moves."""
+        with self.lock:
+            new_board = [[' ' for _ in range(new_size)] for _ in range(new_size)]
+            # Copy existing moves to new board
+            for i in range(min(len(self.board), new_size)):
+                for j in range(min(len(self.board[0]), new_size)):
+                    new_board[i][j] = self.board[i][j]
+            self.board = new_board
+            self.board_size = new_size
 
     def add_player(self, conn, addr) -> bool:
-        """Add a new player to the game."""
-        if not self.game_active:
-            return False
-        if len(self.players) >= self.board_size - 1:
-            return False
-        if len(self.players) >= len(self.symbols):
-            return False
+        """Add a new player to the game and resize board if necessary."""
+        with self.lock:
+            if not self.game_active:
+                return False
+            if len(self.players) >= len(self.symbols):
+                return False
+                
+            self.players.append((conn, addr, self.symbols[len(self.players)]))
             
-        self.players.append((conn, addr, self.symbols[len(self.players)]))
-        return True
+            # Calculate new board size
+            new_size = (len(self.players) + 1) * 2
+            if new_size > self.board_size:
+                self.resize_board(new_size)
+                
+            # Start game if minimum players reached
+            if len(self.players) >= self.min_players and not self.game_started:
+                self.game_started = True
+                
+            return True
 
     def make_move(self, player_idx: int, row: int, col: int) -> bool:
         """Make a move on the board."""
-        if not all(isinstance(x, int) for x in [player_idx, row, col]):
-            return False
+        with self.lock:
+            if not all(isinstance(x, int) for x in [player_idx, row, col]):
+                return False
+                
+            if (not self.game_active or 
+                not self.game_started or
+                self.current_turn != player_idx or 
+                not (0 <= row < self.board_size and 0 <= col < self.board_size) or 
+                self.board[row][col] != ' '):
+                return False
             
-        if (not self.game_active or 
-            self.current_turn != player_idx or 
-            not (0 <= row < self.board_size and 0 <= col < self.board_size) or 
-            self.board[row][col] != ' '):
-            return False
-        
-        self.board[row][col] = self.players[player_idx][2]
-        self.last_move = (row, col)
-        self.current_turn = (self.current_turn + 1) % len(self.players)
-        return True
+            self.board[row][col] = self.players[player_idx][2]
+            self.last_move = (row, col)
+            self.current_turn = (self.current_turn + 1) % len(self.players)
+            return True
 
     def check_winner(self) -> Optional[str]:
         """Check if there's a winner or if the game is a draw."""
@@ -65,6 +86,7 @@ class TicTacToeGame:
         row, col = self.last_move
         symbol = self.board[row][col]
         
+        # Check all possible directions
         directions = [
             [(0, 1), (0, -1)],  # Horizontal
             [(1, 0), (-1, 0)],  # Vertical
@@ -86,6 +108,7 @@ class TicTacToeGame:
             if count >= 3:
                 return symbol
 
+        # Check for draw
         if all(self.board[i][j] != ' ' 
                for i in range(self.board_size) 
                for j in range(self.board_size)):
@@ -165,21 +188,10 @@ class GameServer:
     def handle_new_game(self, conn: socket.socket, addr):
         """Handle creation of a new game."""
         try:
-            players_count_raw = conn.recv(1024).decode(self.FORMAT)
-            if not players_count_raw.isdigit():
-                conn.send("Invalid input: Please enter a number".encode(self.FORMAT))
-                return
-                
-            players_count = int(players_count_raw)
-            if not (2 <= players_count <= 8):
-                conn.send("Invalid player count: Must be between 2 and 8".encode(self.FORMAT))
-                return
-
-            board_size = players_count + 1
-            game = TicTacToeGame(self.next_game_id, board_size)
+            game = TicTacToeGame(self.next_game_id)
             self.games[self.next_game_id] = game
             game.add_player(conn, addr)
-            conn.send(f"Created game {self.next_game_id}. Waiting for other players...\n".encode(self.FORMAT))
+            conn.send(f"Created game {self.next_game_id}. Waiting for at least one more player...\n".encode(self.FORMAT))
             self.next_game_id += 1
             
             self.handle_game(game, conn)
@@ -189,12 +201,15 @@ class GameServer:
 
     def handle_join_game(self, conn: socket.socket, addr):
         """Handle a client joining an existing game."""
-        available_games = [f"Game {gid} ({len(game.players)}/{game.board_size-1} players)"
+        available_games = [f"Game {gid} ({len(game.players)} players, Board: {game.board_size}x{game.board_size})"
                          for gid, game in self.games.items()
-                         if len(game.players) < game.board_size-1 and game.game_active]
+                         if game.game_active]
         
         if not available_games:
             conn.send("No games available".encode(self.FORMAT))
+            choice = conn.recv(1024).decode(self.FORMAT)
+            if choice == "1":
+                self.handle_new_game(conn, addr)
             return
             
         conn.send(("\n".join(available_games)).encode(self.FORMAT))
@@ -212,10 +227,10 @@ class GameServer:
             
             game = self.games[game_id]
             if not game.add_player(conn, addr):
-                conn.send("Game is full or inactive".encode(self.FORMAT))
+                conn.send("Cannot join game - game is inactive or full".encode(self.FORMAT))
                 return
             
-            conn.send(f"Joined game {game_id}. Waiting for other players...\n".encode(self.FORMAT))
+            conn.send(f"Joined game {game_id}.\n".encode(self.FORMAT))
             self.handle_game(game, conn)
             
         except ValueError:
@@ -225,56 +240,49 @@ class GameServer:
         """Handle the main game loop for a specific player."""
         player_idx = next(i for i, (conn, _, _) in enumerate(game.players) if conn == player_conn)
         
-        # Wait for all players to join
-        last_player_count = len(game.players)
-        initial_message_sent = False
-        
-        while len(game.players) < game.board_size - 1:
-            try:
-                # Send waiting message only on initial connection or when player count changes
-                current_player_count = len(game.players)
-                if not initial_message_sent or current_player_count != last_player_count:
-                    for conn, _, _ in game.players:
-                        try:
-                            message = f"Waiting for players... ({current_player_count}/{game.board_size-1})\n"
-                            if current_player_count != last_player_count and last_player_count < current_player_count:
-                                message = f"New player joined! Waiting for {game.board_size-1 - current_player_count} more player(s)...\n"
-                            conn.send(message.encode(self.FORMAT))
-                        except:
-                            continue
-                    initial_message_sent = True
-                    last_player_count = current_player_count
-                
-                time.sleep(1)
-                if not game.game_active:
+        # Wait for minimum players to join if game hasn't started
+        if not game.game_started:
+            last_player_count = len(game.players)
+            initial_message_sent = False
+            
+            while not game.game_started:
+                try:
+                    current_player_count = len(game.players)
+                    if not initial_message_sent or current_player_count != last_player_count:
+                        for conn, _, _ in game.players:
+                            try:
+                                message = f"Waiting for players... ({current_player_count}/{game.min_players} minimum)\n"
+                                if current_player_count != last_player_count and last_player_count < current_player_count:
+                                    message = f"New player joined! Need {game.min_players - current_player_count} more player(s) to start...\n"
+                                conn.send(message.encode(self.FORMAT))
+                            except:
+                                continue
+                        initial_message_sent = True
+                        last_player_count = current_player_count
+                    
+                    time.sleep(1)
+                    if not game.game_active:
+                        return
+                except:
                     return
-            except:
-                return
 
-        # Notify all players that the game is starting
-        for conn, _, _ in game.players:
-            try:
-                conn.send("\nAll players have joined! Game is starting...\n".encode(self.FORMAT))
-            except:
-                continue
-        
-        # Initialize last sent board state for each player
-        last_board_state = {}
-        for conn, _, _ in game.players:
-            last_board_state[conn] = None
+        # Game loop
+        last_board_state = {conn: None for conn, _, _ in game.players}
         
         while game.game_active:
             try:
                 game_state = self.format_board(game)
                 current_player_symbol = game.players[game.current_turn][2]
                 status = f"\nCurrent turn: {current_player_symbol}\n"
+                status += f"Players: {', '.join(symbol for _, _, symbol in game.players)}\n"
+                status += f"Board size: {game.board_size}x{game.board_size}\n"
                 
-                # Only send board state if it has changed
                 current_state = game_state + status
                 
+                # Send updates to all players
                 for conn, _, symbol in game.players:
                     try:
-                        if last_board_state[conn] != current_state:
+                        if conn not in last_board_state or last_board_state[conn] != current_state:
                             conn.send(current_state.encode(self.FORMAT))
                             if game.current_turn == next(i for i, (c, _, _) in enumerate(game.players) if c == conn):
                                 conn.send("Your turn! Enter move (row,col):".encode(self.FORMAT))
@@ -282,9 +290,9 @@ class GameServer:
                                 conn.send(f"Waiting for player {current_player_symbol}'s move...".encode(self.FORMAT))
                             last_board_state[conn] = current_state
                     except:
-                        game.game_active = False
                         continue
 
+                # Handle moves
                 if game.current_turn == player_idx:
                     try:
                         move = player_conn.recv(1024).decode(self.FORMAT)
@@ -298,7 +306,6 @@ class GameServer:
                             continue
                             
                         if game.make_move(player_idx, row, col):
-                            # Clear last board state to ensure update gets sent
                             last_board_state = {conn: None for conn in last_board_state}
                             winner = game.check_winner()
                             if winner:
@@ -307,14 +314,12 @@ class GameServer:
                         else:
                             player_conn.send("Invalid move. Try again.".encode(self.FORMAT))
                     except ConnectionError:
-                        game.game_active = False
                         break
                         
-                time.sleep(0.1)  # Add small delay to prevent excessive CPU usage
-                        
+                time.sleep(0.1)
+                
             except Exception as e:
                 print(f"[GAME ERROR] {e}")
-                game.game_active = False
                 break
 
     def format_board(self, game: TicTacToeGame) -> str:
