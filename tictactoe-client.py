@@ -29,14 +29,18 @@ class TicTacToeClient:
 
     def handle_game_creation(self, client_socket: socket.socket) -> bool:
         """Handle creating a new game."""
-        client_socket.send("1".encode(self.FORMAT))  # Send confirmation of game creation
-        print("Creating new game... Waiting for players...")
+        while True:
+            players_count = input("Enter number of players (2-8): ")
+            if players_count.isdigit() and 2 <= int(players_count) <= 8:
+                break
+            print("Invalid number. Please enter a number between 2 and 8.")
+            
+        client_socket.send(players_count.encode(self.FORMAT))
+        print(f"Created new game for {players_count} players")
         return True
 
     def handle_game_joining(self, client_socket: socket.socket) -> bool:
         """Handle joining an existing game. Returns True if successful, False if need to retry."""
-        client_socket.send("2".encode(self.FORMAT))  # Send choice to join game
-        
         available_games = client_socket.recv(1024).decode(self.FORMAT)
         print("\nAvailable games:")
         print(available_games)
@@ -53,12 +57,13 @@ class TicTacToeClient:
                     break
                 print("Invalid choice. Please enter 1, 2, or 3.")
 
-            client_socket.send(retry_choice.encode(self.FORMAT))
             if retry_choice == '3':
                 return False
             elif retry_choice == '1':
+                client_socket.send('1'.encode(self.FORMAT))
                 return self.handle_game_creation(client_socket)
             else:  # retry_choice == '2'
+                client_socket.send('2'.encode(self.FORMAT))
                 return self.handle_game_joining(client_socket)
 
         while True:
@@ -68,14 +73,6 @@ class TicTacToeClient:
             print("Invalid input. Please enter a number.")
             
         client_socket.send(game_id.encode(self.FORMAT))
-        
-        # Wait for confirmation or error message
-        response = client_socket.recv(1024).decode(self.FORMAT)
-        if "Cannot join" in response or "Invalid" in response:
-            print(response)
-            return False
-            
-        print(f"\nSuccessfully joined game {game_id}")
         return True
 
     def receive_messages(self, client_socket: socket.socket):
@@ -115,6 +112,8 @@ class TicTacToeClient:
                     if choice in ['1', '2']:
                         break
                     print("Invalid choice. Please enter 1 or 2.")
+
+                client_socket.send(choice.encode(self.FORMAT))
 
                 # Handle game creation or joining
                 success = False
