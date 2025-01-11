@@ -227,22 +227,18 @@ class GameServer:
         
         # Wait for all players to join
         last_player_count = len(game.players)
-        initial_message_sent = False
+        player_received_start = False
         
         while len(game.players) < game.board_size - 1:
             try:
-                # Send waiting message only on initial connection or when player count changes
                 current_player_count = len(game.players)
-                if not initial_message_sent or current_player_count != last_player_count:
+                if current_player_count != last_player_count:
+                    message = f"New player joined! Waiting for {game.board_size-1 - current_player_count} more player(s)...\n"
                     for conn, _, _ in game.players:
                         try:
-                            message = f"Waiting for players... ({current_player_count}/{game.board_size-1})\n"
-                            if current_player_count != last_player_count and last_player_count < current_player_count:
-                                message = f"New player joined! Waiting for {game.board_size-1 - current_player_count} more player(s)...\n"
                             conn.send(message.encode(self.FORMAT))
                         except:
                             continue
-                    initial_message_sent = True
                     last_player_count = current_player_count
                 
                 time.sleep(1)
@@ -251,39 +247,36 @@ class GameServer:
             except:
                 return
 
-        # Notify all players that the game is starting
-        for conn, _, _ in game.players:
+        # Send game start message only once per player
+        if not player_received_start:
             try:
-                conn.send("\nAll players have joined! Game is starting...\n".encode(self.FORMAT))
+                player_conn.send("\nAll players have joined! Game is starting...\n".encode(self.FORMAT))
+                player_received_start = True
             except:
-                continue
-        
-        # Initialize last sent board state for each player
-        last_board_state = {}
-        for conn, _, _ in game.players:
-            last_board_state[conn] = None
+                return
+
+        # Track last known game state for this player
+        last_known_state = None
         
         while game.game_active:
             try:
                 game_state = self.format_board(game)
                 current_player_symbol = game.players[game.current_turn][2]
                 status = f"\nCurrent turn: {current_player_symbol}\n"
-                
-                # Only send board state if it has changed
                 current_state = game_state + status
                 
-                for conn, _, symbol in game.players:
+                # Only send updates if the state has changed for this player
+                if current_state != last_known_state:
                     try:
-                        if last_board_state[conn] != current_state:
-                            conn.send(current_state.encode(self.FORMAT))
-                            if game.current_turn == next(i for i, (c, _, _) in enumerate(game.players) if c == conn):
-                                conn.send("Your turn! Enter move (row,col):".encode(self.FORMAT))
-                            else:
-                                conn.send(f"Waiting for player {current_player_symbol}'s move...".encode(self.FORMAT))
-                            last_board_state[conn] = current_state
+                        player_conn.send(current_state.encode(self.FORMAT))
+                        if game.current_turn == player_idx:
+                            player_conn.send("Your turn! Enter move (row,col):".encode(self.FORMAT))
+                        else:
+                            player_conn.send(f"Waiting for player {current_player_symbol}'s move...".encode(self.FORMAT))
+                        last_known_state = current_state
                     except:
                         game.game_active = False
-                        continue
+                        break
 
                 if game.current_turn == player_idx:
                     try:
@@ -298,8 +291,7 @@ class GameServer:
                             continue
                             
                         if game.make_move(player_idx, row, col):
-                            # Clear last board state to ensure update gets sent
-                            last_board_state = {conn: None for conn in last_board_state}
+                            last_known_state = None  # Reset state to force update after move
                             winner = game.check_winner()
                             if winner:
                                 game.game_active = False
@@ -309,9 +301,9 @@ class GameServer:
                     except ConnectionError:
                         game.game_active = False
                         break
-                        
-                time.sleep(0.1)  # Add small delay to prevent excessive CPU usage
-                        
+                    
+                time.sleep(0.1)
+                    
             except Exception as e:
                 print(f"[GAME ERROR] {e}")
                 game.game_active = False
